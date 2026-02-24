@@ -7,9 +7,14 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 contract BootstrapPortal is Ownable, ReentrancyGuard {
     // ==================== CONSTANTS ====================
-    uint256 public constant PRICE_DECIMALS = 1e6; // 6 decimals for price
     uint256 public constant PERCENT_DECIMALS = 10000; // 10000 = 100%
-
+    
+    // ==================== CONFIGURABLE VARIABLES ====================
+    uint256 public usdtDecimals = 6;      // USDT decimals (default 6)
+    uint256 public tokenDecimals = 18;    // Token decimals (default 18)
+    uint256 public priceDecimals = 6;     // Output price decimals (default 6)
+    uint256 public precisionMultiplier = 1e12; // For high precision calculations
+    
     // ==================== STATE VARIABLES ====================
     IERC20 public immutable usdtToken;
     IERC20 public immutable fierceToken;
@@ -30,6 +35,7 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
     event CashbackSent(address indexed recipient, uint256 tokenAmount, uint256 priceBefore, uint256 priceAfter);
     event SwapFeeUpdated(uint256 newFeePercent);
     event ReservesSynced(uint256 usdtBalance, uint256 tokenBalance);
+    event DecimalsConfigUpdated(uint256 usdtDecimals, uint256 tokenDecimals, uint256 priceDecimals);
 
     // ==================== CONSTRUCTOR ====================
     constructor(
@@ -44,7 +50,98 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
         fierceToken = IERC20(_fierceTokenAddress);
     }
     
-    // ==================== CRITICAL FUNCTION: INITIALIZE POOL ====================
+    // ==================== CONFIGURATION FUNCTIONS ====================
+    /**
+     * @notice Update decimals configuration (in case of different tokens)
+     * @dev Can be called by owner to adjust precision without redeploying
+     */
+    function updateDecimalsConfig(
+        uint256 _usdtDecimals,
+        uint256 _tokenDecimals,
+        uint256 _priceDecimals
+    ) external onlyOwner {
+        require(_usdtDecimals > 0 && _usdtDecimals <= 18, "Invalid USDT decimals");
+        require(_tokenDecimals > 0 && _tokenDecimals <= 18, "Invalid token decimals");
+        require(_priceDecimals > 0 && _priceDecimals <= 18, "Invalid price decimals");
+        
+        usdtDecimals = _usdtDecimals;
+        tokenDecimals = _tokenDecimals;
+        priceDecimals = _priceDecimals;
+        
+        emit DecimalsConfigUpdated(_usdtDecimals, _tokenDecimals, _priceDecimals);
+    }
+    
+    /**
+     * @notice Update precision multiplier for more accurate calculations
+     */
+    function updatePrecisionMultiplier(uint256 newMultiplier) external onlyOwner {
+        require(newMultiplier >= 1e6 && newMultiplier <= 1e18, "Multiplier out of range");
+        precisionMultiplier = newMultiplier;
+    }
+    
+    // ==================== PRICE FUNCTIONS (CORREGIDAS) ====================
+    function getCurrentPrice() public view returns (uint256) {
+        uint256 effectiveTokens = getEffectiveTokens();
+        if (effectiveTokens == 0) return 0;
+        
+        // Fórmula corregida para manejar diferentes decimales:
+        // price = (usdtReserve * 10^priceDecimals * precisionMultiplier) / effectiveTokens
+        // Luego dividimos por precisionMultiplier para normalizar
+        
+        uint256 usdtScaled = usdtReserve * (10 ** priceDecimals) * precisionMultiplier;
+        uint256 price = usdtScaled / effectiveTokens;
+        
+        // Normalizar dividiendo por precisionMultiplier
+        return price / precisionMultiplier;
+    }
+    
+    /**
+     * @notice Get price in human readable format (as uint with priceDecimals)
+     */
+    function getPriceHuman() external view returns (uint256) {
+        return getCurrentPrice();
+    }
+    
+    /**
+     * @notice Get price as string for display (e.g., "0.0034")
+     */
+    function getPriceAsString() external view returns (string memory) {
+        uint256 price = getCurrentPrice();
+        uint256 integerPart = price / (10 ** priceDecimals);
+        uint256 decimalPart = price % (10 ** priceDecimals);
+        
+        // Padding decimal part with leading zeros
+        string memory decimalStr = Strings.toString(decimalPart);
+        while (bytes(decimalStr).length < priceDecimals) {
+            decimalStr = string(abi.encodePacked("0", decimalStr));
+        }
+        
+        return string(abi.encodePacked(
+            Strings.toString(integerPart),
+            ".",
+            decimalStr
+        ));
+    }
+
+    function getEffectiveTokens() public view returns (uint256) {
+        // Prevent underflow
+        return tokenReserve > virtualBurnedTokens ? tokenReserve - virtualBurnedTokens : 0;
+    }
+
+    function syncReserves() external onlyOwner {
+        usdtReserve = usdtToken.balanceOf(address(this));
+        tokenReserve = fierceToken.balanceOf(address(this));
+        
+        emit ReservesSynced(usdtReserve, tokenReserve);
+    }
+
+    function setSwapFeePercent(uint256 newPercent) external onlyOwner {
+        require(newPercent <= 1000, "Max fee is 10%");
+        swapFeePercent = newPercent;
+        emit SwapFeeUpdated(newPercent);
+    }
+    
+    // ==================== INITIALIZE POOL ====================
     function initializePool(
         uint256 initialUsdt,
         uint256 initialTokens
@@ -70,31 +167,6 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
         emit PoolInitialized(initialUsdt, initialTokens);
     }
     
-    // ==================== PRICE FUNCTIONS ====================
-    function getCurrentPrice() public view returns (uint256) {
-        uint256 effectiveTokens = getEffectiveTokens();
-        if (effectiveTokens == 0) return 0;
-        return (usdtReserve * PRICE_DECIMALS) / effectiveTokens;
-    }
-
-    function getEffectiveTokens() public view returns (uint256) {
-        // Prevent underflow
-        return tokenReserve > virtualBurnedTokens ? tokenReserve - virtualBurnedTokens : 0;
-    }
-
-    function syncReserves() external onlyOwner {
-        usdtReserve = usdtToken.balanceOf(address(this));
-        tokenReserve = fierceToken.balanceOf(address(this));
-        
-        emit ReservesSynced(usdtReserve, tokenReserve);
-    }
-
-    function setSwapFeePercent(uint256 newPercent) external onlyOwner {
-        require(newPercent <= 1000, "Max fee is 10%");
-        swapFeePercent = newPercent;
-        emit SwapFeeUpdated(newPercent);
-    }
-    
     // ==================== SERVICE PURCHASE ====================
     function processServicePurchase(
         address buyer,
@@ -116,18 +188,19 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
         // 2. Update reserves (USDT increases)
         usdtReserve += usdtAmount;
 
-        // 3. Calculate and apply virtual burn
+        // 3. Calculate and apply virtual burn (CORREGIDO con manejo de decimales)
         uint256 tokensBurnedVirtual;
         if (priceBefore > 0) {
-            // tokensBurned = (usdtAmount * burnPercent) / (priceBefore * 10000)
-            tokensBurnedVirtual = (usdtAmount * PRICE_DECIMALS * burnPercent) / 
-                                  (priceBefore * PERCENT_DECIMALS);
+            // Ajuste por decimales: escalar para mantener precisión
+            uint256 scaledAmount = usdtAmount * precisionMultiplier;
+            tokensBurnedVirtual = (scaledAmount * PRICE_DECIMALS_SAFE() * burnPercent) / 
+                                  (priceBefore * PERCENT_DECIMALS * precisionMultiplier);
         } else {
             // First transaction: use initial price assumption
-            // Assuming we want initial price of 0.001 USDT per token
-            uint256 assumedInitialPrice = 1 * PRICE_DECIMALS / 1000; // 0.001 USDT
-            tokensBurnedVirtual = (usdtAmount * PRICE_DECIMALS * burnPercent) / 
-                                  (assumedInitialPrice * PERCENT_DECIMALS);
+            uint256 assumedInitialPrice = 1 * (10 ** priceDecimals) / 1000; // 0.001 USDT
+            uint256 scaledAmount = usdtAmount * precisionMultiplier;
+            tokensBurnedVirtual = (scaledAmount * PRICE_DECIMALS_SAFE() * burnPercent) / 
+                                  (assumedInitialPrice * PERCENT_DECIMALS * precisionMultiplier);
         }
 
         virtualBurnedTokens += tokensBurnedVirtual;
@@ -140,94 +213,7 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
         return newPrice;
     }
     
-    // ==================== ADD LIQUIDITY ====================
-    /**
-     * @notice Add liquidity to the pool at any time (USDT and FierceToken)
-     * @dev Updates both reserves and automatically adjusts price
-     * @param usdtAmount Amount of USDT to add
-     * @param tokenAmount Amount of FierceToken to add
-     * @return newPrice The new price after adding liquidity
-     */
-    function addLiquidity(
-        uint256 usdtAmount,
-        uint256 tokenAmount
-    ) external onlyOwner nonReentrant returns (uint256 newPrice) {
-        require(usdtAmount > 0 && tokenAmount > 0, "Amounts must be > 0");
-        require(usdtReserve > 0 && tokenReserve > 0, "Pool must be initialized first");
-        
-        uint256 priceBefore = getCurrentPrice();
-
-        // 1. Transfer USDT from owner
-        require(
-            usdtToken.transferFrom(msg.sender, address(this), usdtAmount),
-            "USDT transfer failed"
-        );
-
-        // 2. Transfer FierceToken from owner
-        require(
-            fierceToken.transferFrom(msg.sender, address(this), tokenAmount),
-            "Token transfer failed"
-        );
-
-        // 3. Update reserves (both increase)
-        usdtReserve += usdtAmount;
-        tokenReserve += tokenAmount;
-
-        // 4. Get new price
-        newPrice = getCurrentPrice();
-
-        emit ReservesSynced(usdtReserve, tokenReserve);
-        
-        return newPrice;
-    }
-    
-    function upnLiquidity(
-        address buyer,
-        address userAddress,
-        uint256 usdtAmount,
-        uint256 burnPercent
-    ) external onlyOwner nonReentrant returns (uint256 newPrice) {
-        require(buyer != address(0), "Invalid buyer");
-        require(userAddress != address(0), "Invalid user address");
-        require(usdtAmount > 0, "Amount must be > 0");
-        require(burnPercent <= 5000, "Burn percent cannot exceed 50%");
-        
-        uint256 priceBefore = getCurrentPrice();
-
-        // 1. Transfer USDT from buyer
-        require(
-            usdtToken.transferFrom(buyer, address(this), usdtAmount),
-            "USDT transfer failed"
-        );
-
-        // 2. Update reserves (USDT increases)
-        usdtReserve += usdtAmount;
-
-        // 3. Calculate and apply virtual burn
-        uint256 tokensBurnedVirtual;
-        if (priceBefore > 0) {
-            // tokensBurned = (usdtAmount * burnPercent) / (priceBefore * 10000)
-            tokensBurnedVirtual = (usdtAmount * PRICE_DECIMALS * burnPercent) / 
-                                  (priceBefore * PERCENT_DECIMALS);
-        } else {
-            // First transaction: use initial price assumption
-            // Assuming we want initial price of 0.001 USDT per token
-            uint256 assumedInitialPrice = 1 * PRICE_DECIMALS / 1000; // 0.001 USDT
-            tokensBurnedVirtual = (usdtAmount * PRICE_DECIMALS * burnPercent) / 
-                                  (assumedInitialPrice * PERCENT_DECIMALS);
-        }
-
-        virtualBurnedTokens += tokensBurnedVirtual;
-
-        // 4. Get new price
-        newPrice = getCurrentPrice();
-
-        emit ServicePurchased(buyer, userAddress, usdtAmount, burnPercent, tokensBurnedVirtual, priceBefore, newPrice);
-        
-        return newPrice;
-    }
-    
-    // ==================== TOKEN BUY (CORRECTED AMM FORMULA) ====================
+    // ==================== TOKEN BUY (CORREGIDO) ====================
     function processTokenBuy(
         address buyer,
         uint256 usdtAmount
@@ -246,37 +232,33 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
             "USDT transfer failed"
         );
 
-        // 2. Calculate tokens to send using correct AMM formula:
-        // tokens_out = effectiveTokens - (effectiveTokens * usdtReserve) / (usdtReserve + usdtAmount)
-        // This maintains constant product: (effectiveTokens - tokens_out) * (usdtReserve + usdtAmount) = effectiveTokens * usdtReserve
-        
-        // Apply fee (fee stays in contract)
+        // 2. Apply fee
         uint256 usdtAfterFee = usdtAmount;
         if (swapFeePercent > 0) {
             uint256 fee = (usdtAmount * swapFeePercent) / PERCENT_DECIMALS;
-            // Fee remains in contract and increases usdtReserve
             usdtAfterFee = usdtAmount - fee;
         }
 
-        // CORRECT AMM FORMULA for buying tokens:
-        tokensToBuy = effectiveTokens - 
-                     (effectiveTokens * usdtReserve) / 
-                     (usdtReserve + usdtAfterFee);
+        // 3. CORRECT AMM FORMULA con manejo de precisión
+        // Usando multiplicador de precisión para evitar overflow
+        uint256 numerator = effectiveTokens * usdtReserve * precisionMultiplier;
+        uint256 denominator = (usdtReserve + usdtAfterFee) * precisionMultiplier;
+        tokensToBuy = effectiveTokens - (numerator / denominator);
 
         require(tokensToBuy > 0, "Insufficient output amount");
         require(tokensToBuy <= tokenReserve, "Insufficient tokens in pool");
 
-        // 3. Update reserves
-        usdtReserve += usdtAmount;      // All USDT stays in pool (including fee)
-        tokenReserve -= tokensToBuy;    // Remove tokens from pool
+        // 4. Update reserves
+        usdtReserve += usdtAmount;
+        tokenReserve -= tokensToBuy;
 
-        // 4. Send tokens to buyer
+        // 5. Send tokens to buyer
         require(
             fierceToken.transfer(buyer, tokensToBuy),
             "Token transfer failed"
         );
 
-        // 5. Get new price
+        // 6. Get new price
         newPrice = getCurrentPrice();
 
         emit TokensBought(buyer, usdtAmount, tokensToBuy, priceBefore, newPrice);
@@ -284,7 +266,7 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
         return (tokensToBuy, newPrice);
     }
 
-    // ==================== TOKEN SALE (CORRECTED AMM FORMULA) ====================
+    // ==================== TOKEN SALE (CORREGIDO) ====================
     function processTokenSell(
         address seller,
         uint256 tokenAmount
@@ -301,31 +283,27 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
             "Token transfer failed"
         );
 
-        // 2. Calculate USDT to send using correct AMM formula:
-        // usdt_out = usdtReserve - (usdtReserve * effectiveTokens) / (effectiveTokens + tokenAmount)
-        
-        // CORRECT AMM FORMULA for selling tokens:
-        usdtToSend = usdtReserve - 
-                    (usdtReserve * effectiveTokens) / 
-                    (effectiveTokens + tokenAmount);
+        // 2. Calculate USDT to send usando fórmula corregida
+        uint256 numerator = usdtReserve * effectiveTokens * precisionMultiplier;
+        uint256 denominator = (effectiveTokens + tokenAmount) * precisionMultiplier;
+        usdtToSend = usdtReserve - (numerator / denominator);
 
         require(usdtToSend > 0, "Insufficient output amount");
 
-        // Apply fee (deducted from seller's payout)
+        // 3. Apply fee
         uint256 fee = 0;
         if (swapFeePercent > 0) {
             fee = (usdtToSend * swapFeePercent) / PERCENT_DECIMALS;
             usdtToSend -= fee;
-            // Fee stays in contract (already accounted in usdtReserve)
         }
 
         require(usdtToSend <= usdtReserve, "Insufficient USDT in pool");
 
-        // 3. Update reserves
-        tokenReserve += tokenAmount;    // Add tokens to pool
-        usdtReserve -= usdtToSend;      // Remove USDT from pool (fee remains)
+        // 4. Update reserves
+        tokenReserve += tokenAmount;
+        usdtReserve -= usdtToSend;
 
-        // 4. Send USDT to seller
+        // 5. Send USDT to seller
         require(
             usdtToken.transfer(seller, usdtToSend),
             "USDT transfer failed"
@@ -337,14 +315,6 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
     }
     
     // ==================== ENVISION CASHBACK ====================
-    /**
-     * @notice Sends tokens as cashback to users (e.g., prediction platform losers)
-     * @dev This INCREASES the token price because it reduces effective supply
-     * IMPORTANT: This is BETTER than minting new tokens because:
-     * 1. No inflation
-     * 2. Increases token value for holders
-     * 3. Rewards come from existing supply
-     */
     function envisionCashback(
         address recipient,
         uint256 tokenAmount
@@ -357,7 +327,6 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
 
         // 1. Update reserves (remove tokens from pool)
         tokenReserve -= tokenAmount;
-        // NOTE: virtualBurnedTokens remains the same
         
         // 2. Send tokens to recipient
         require(
@@ -373,7 +342,7 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
         return newPrice;
     }
     
-    // ==================== INFO FUNCTIONS ====================
+    // ==================== INFO FUNCTIONS MEJORADAS ====================
     function getPoolInfo() external view returns (
         uint256 currentPrice,
         uint256 currentUsdtReserve,
@@ -382,7 +351,8 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
         uint256 effectiveTokens,
         uint256 realUsdtBalance,
         uint256 realTokenBalance,
-        uint256 kValue
+        uint256 kValue,
+        uint256 priceHuman
     ) {
         currentPrice = getCurrentPrice();
         currentUsdtReserve = usdtReserve;
@@ -390,89 +360,88 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
         currentVirtualBurned = virtualBurnedTokens;
         effectiveTokens = getEffectiveTokens();
         
-        // Real balances (verification)
+        // Real balances
         realUsdtBalance = usdtToken.balanceOf(address(this));
         realTokenBalance = fierceToken.balanceOf(address(this));
         
         // Constant product k = usdtReserve * effectiveTokens
         kValue = usdtReserve * effectiveTokens;
+        
+        // Price in human readable format (with priceDecimals)
+        priceHuman = currentPrice;
     }
     
-    // ==================== LIQUIDITY WITHDRAWAL (SECURITY MEASURES) ====================
     /**
-     * @notice Withdraw FierceToken from pool (security measure for temporary contracts)
-     * @dev Can only be called by owner, has reentrancy protection
-     * @param amount Amount of FierceToken to withdraw
-     * @return newPrice The new price after withdrawal
+     * @notice Get detailed pool info incluyendo valores formateados
      */
+    function getDetailedPoolInfo() external view returns (
+        uint256 price,
+        uint256 usdtInPool,
+        uint256 tokensInPool,
+        uint256 usdtInPoolHuman,
+        uint256 tokensInPoolHuman,
+        uint256 priceHuman
+    ) {
+        price = getCurrentPrice();
+        usdtInPool = usdtReserve;
+        tokensInPool = tokenReserve;
+        
+        // Valores en formato humano (sin decimales del token)
+        usdtInPoolHuman = usdtReserve / (10 ** usdtDecimals);
+        tokensInPoolHuman = tokenReserve / (10 ** tokenDecimals);
+        priceHuman = price;
+    }
+    
+    // ==================== INTERNAL FUNCTIONS ====================
+    function PRICE_DECIMALS_SAFE() internal view returns (uint256) {
+        return 10 ** priceDecimals;
+    }
+    
+    // ==================== LIQUIDITY WITHDRAWAL ====================
     function withdrawFierceTokens(
         uint256 amount
     ) external onlyOwner nonReentrant returns (uint256 newPrice) {
         require(amount > 0, "Amount must be > 0");
         require(amount <= tokenReserve, "Insufficient tokens in pool");
         
-        uint256 priceBefore = getCurrentPrice();
-
-        // Update reserves
         tokenReserve -= amount;
-
-        // Send tokens to owner
+        
         require(
             fierceToken.transfer(msg.sender, amount),
             "Token transfer failed"
         );
 
-        // Calculate new price
         newPrice = getCurrentPrice();
-
         emit ReservesSynced(usdtReserve, tokenReserve);
         
         return newPrice;
     }
 
-    /**
-     * @notice Withdraw USDT from pool (security measure for temporary contracts)
-     * @dev Can only be called by owner, has reentrancy protection
-     * @param amount Amount of USDT to withdraw
-     * @return newPrice The new price after withdrawal
-     */
     function withdrawUSDT(
         uint256 amount
     ) external onlyOwner nonReentrant returns (uint256 newPrice) {
         require(amount > 0, "Amount must be > 0");
         require(amount <= usdtReserve, "Insufficient USDT in pool");
         
-        uint256 priceBefore = getCurrentPrice();
-
-        // Update reserves
         usdtReserve -= amount;
-
-        // Send USDT to owner
+        
         require(
             usdtToken.transfer(msg.sender, amount),
             "USDT transfer failed"
         );
 
-        // Calculate new price
         newPrice = getCurrentPrice();
-
         emit ReservesSynced(usdtReserve, tokenReserve);
         
         return newPrice;
     }
 
     // ==================== EMERGENCY FUNCTIONS ====================
-    /**
-     * @notice Adjust virtual burned tokens (for corrections if needed)
-     */
     function adjustVirtualBurned(uint256 newVirtualBurned) external onlyOwner {
         require(newVirtualBurned <= tokenReserve, "Cannot burn more than total tokens");
         virtualBurnedTokens = newVirtualBurned;
     }
     
-    /**
-     * @notice Withdraw tokens accidentally sent to contract (excluding pool tokens)
-     */
     function rescueTokens(
         address tokenAddress,
         uint256 amount
@@ -483,44 +452,60 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
         IERC20(tokenAddress).transfer(msg.sender, amount);
     }
     
-    /**
-     * @notice Estimate tokens received for a USDT amount (view function)
-     */
+    // ==================== ESTIMATE FUNCTIONS CORREGIDAS ====================
     function estimateTokensForUSDT(uint256 usdtAmount) external view returns (uint256 tokensOut) {
         uint256 effectiveTokens = getEffectiveTokens();
         if (effectiveTokens == 0 || usdtReserve == 0) return 0;
         
-        // Apply fee
         uint256 usdtAfterFee = usdtAmount;
         if (swapFeePercent > 0) {
             uint256 fee = (usdtAmount * swapFeePercent) / PERCENT_DECIMALS;
             usdtAfterFee = usdtAmount - fee;
         }
         
-        tokensOut = effectiveTokens - 
-                   (effectiveTokens * usdtReserve) / 
-                   (usdtReserve + usdtAfterFee);
+        // Fórmula corregida con precisión
+        uint256 numerator = effectiveTokens * usdtReserve * precisionMultiplier;
+        uint256 denominator = (usdtReserve + usdtAfterFee) * precisionMultiplier;
+        tokensOut = effectiveTokens - (numerator / denominator);
         
         return tokensOut;
     }
     
-    /**
-     * @notice Estimate USDT received for selling tokens (view function)
-     */
     function estimateUSDTForTokens(uint256 tokenAmount) external view returns (uint256 usdtOut) {
         uint256 effectiveTokens = getEffectiveTokens();
         if (effectiveTokens == 0) return 0;
         
-        usdtOut = usdtReserve - 
-                 (usdtReserve * effectiveTokens) / 
-                 (effectiveTokens + tokenAmount);
+        uint256 numerator = usdtReserve * effectiveTokens * precisionMultiplier;
+        uint256 denominator = (effectiveTokens + tokenAmount) * precisionMultiplier;
+        usdtOut = usdtReserve - (numerator / denominator);
         
-        // Apply fee
         if (swapFeePercent > 0) {
             uint256 fee = (usdtOut * swapFeePercent) / PERCENT_DECIMALS;
             usdtOut -= fee;
         }
         
         return usdtOut;
+    }
+}
+
+// ==================== LIBRERÍA STRINGS (agregar al final) ====================
+library Strings {
+    function toString(uint256 value) internal pure returns (string memory) {
+        if (value == 0) {
+            return "0";
+        }
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
     }
 }
