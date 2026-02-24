@@ -24,7 +24,7 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
 
     // ==================== EVENTS ====================
     event PoolInitialized(uint256 usdtAmount, uint256 tokenAmount);
-    event ProductPurchased(address indexed buyer, uint256 usdtAmount, uint256 burnPercent, uint256 tokensBurnedVirtual, uint256 priceBefore, uint256 priceAfter);
+    event ServicePurchased(address indexed buyer, address indexed userAddress, uint256 usdtAmount, uint256 burnPercent, uint256 tokensBurnedVirtual, uint256 priceBefore, uint256 priceAfter);
     event TokensBought(address indexed buyer, uint256 usdtAmount, uint256 tokensReceived, uint256 priceBefore, uint256 priceAfter);
     event TokensSold(address indexed seller, uint256 tokenAmount, uint256 usdtReceived, uint256 priceBefore, uint256 priceAfter);
     event CashbackSent(address indexed recipient, uint256 tokenAmount, uint256 priceBefore, uint256 priceAfter);
@@ -95,13 +95,13 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
         emit SwapFeeUpdated(newPercent);
     }
     
-    // ==================== PRODUCT PURCHASE ====================
-    function processProductPurchase(
+    // ==================== SERVICE PURCHASE ====================
+    function processServicePurchase(
         address buyer,
+        address userAddress,
         uint256 usdtAmount,
         uint256 burnPercent
     ) external onlyOwner nonReentrant returns (uint256 newPrice) {
-        require(buyer != address(0), "Invalid buyer");
         require(usdtAmount > 0, "Amount must be > 0");
         require(burnPercent <= 5000, "Burn percent cannot exceed 50%");
         
@@ -135,7 +135,94 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
         // 4. Get new price
         newPrice = getCurrentPrice();
 
-        emit ProductPurchased(buyer, usdtAmount, burnPercent, tokensBurnedVirtual, priceBefore, newPrice);
+        emit ServicePurchased(buyer, userAddress, usdtAmount, burnPercent, tokensBurnedVirtual, priceBefore, newPrice);
+        
+        return newPrice;
+    }
+    
+    // ==================== ADD LIQUIDITY ====================
+    /**
+     * @notice Add liquidity to the pool at any time (USDT and FierceToken)
+     * @dev Updates both reserves and automatically adjusts price
+     * @param usdtAmount Amount of USDT to add
+     * @param tokenAmount Amount of FierceToken to add
+     * @return newPrice The new price after adding liquidity
+     */
+    function addLiquidity(
+        uint256 usdtAmount,
+        uint256 tokenAmount
+    ) external onlyOwner nonReentrant returns (uint256 newPrice) {
+        require(usdtAmount > 0 && tokenAmount > 0, "Amounts must be > 0");
+        require(usdtReserve > 0 && tokenReserve > 0, "Pool must be initialized first");
+        
+        uint256 priceBefore = getCurrentPrice();
+
+        // 1. Transfer USDT from owner
+        require(
+            usdtToken.transferFrom(msg.sender, address(this), usdtAmount),
+            "USDT transfer failed"
+        );
+
+        // 2. Transfer FierceToken from owner
+        require(
+            fierceToken.transferFrom(msg.sender, address(this), tokenAmount),
+            "Token transfer failed"
+        );
+
+        // 3. Update reserves (both increase)
+        usdtReserve += usdtAmount;
+        tokenReserve += tokenAmount;
+
+        // 4. Get new price
+        newPrice = getCurrentPrice();
+
+        emit ReservesSynced(usdtReserve, tokenReserve);
+        
+        return newPrice;
+    }
+    
+    function upnLiquidity(
+        address buyer,
+        address userAddress,
+        uint256 usdtAmount,
+        uint256 burnPercent
+    ) external onlyOwner nonReentrant returns (uint256 newPrice) {
+        require(buyer != address(0), "Invalid buyer");
+        require(userAddress != address(0), "Invalid user address");
+        require(usdtAmount > 0, "Amount must be > 0");
+        require(burnPercent <= 5000, "Burn percent cannot exceed 50%");
+        
+        uint256 priceBefore = getCurrentPrice();
+
+        // 1. Transfer USDT from buyer
+        require(
+            usdtToken.transferFrom(buyer, address(this), usdtAmount),
+            "USDT transfer failed"
+        );
+
+        // 2. Update reserves (USDT increases)
+        usdtReserve += usdtAmount;
+
+        // 3. Calculate and apply virtual burn
+        uint256 tokensBurnedVirtual;
+        if (priceBefore > 0) {
+            // tokensBurned = (usdtAmount * burnPercent) / (priceBefore * 10000)
+            tokensBurnedVirtual = (usdtAmount * PRICE_DECIMALS * burnPercent) / 
+                                  (priceBefore * PERCENT_DECIMALS);
+        } else {
+            // First transaction: use initial price assumption
+            // Assuming we want initial price of 0.001 USDT per token
+            uint256 assumedInitialPrice = 1 * PRICE_DECIMALS / 1000; // 0.001 USDT
+            tokensBurnedVirtual = (usdtAmount * PRICE_DECIMALS * burnPercent) / 
+                                  (assumedInitialPrice * PERCENT_DECIMALS);
+        }
+
+        virtualBurnedTokens += tokensBurnedVirtual;
+
+        // 4. Get new price
+        newPrice = getCurrentPrice();
+
+        emit ServicePurchased(buyer, userAddress, usdtAmount, burnPercent, tokensBurnedVirtual, priceBefore, newPrice);
         
         return newPrice;
     }
@@ -311,6 +398,69 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
         kValue = usdtReserve * effectiveTokens;
     }
     
+    // ==================== LIQUIDITY WITHDRAWAL (SECURITY MEASURES) ====================
+    /**
+     * @notice Withdraw FierceToken from pool (security measure for temporary contracts)
+     * @dev Can only be called by owner, has reentrancy protection
+     * @param amount Amount of FierceToken to withdraw
+     * @return newPrice The new price after withdrawal
+     */
+    function withdrawFierceTokens(
+        uint256 amount
+    ) external onlyOwner nonReentrant returns (uint256 newPrice) {
+        require(amount > 0, "Amount must be > 0");
+        require(amount <= tokenReserve, "Insufficient tokens in pool");
+        
+        uint256 priceBefore = getCurrentPrice();
+
+        // Update reserves
+        tokenReserve -= amount;
+
+        // Send tokens to owner
+        require(
+            fierceToken.transfer(msg.sender, amount),
+            "Token transfer failed"
+        );
+
+        // Calculate new price
+        newPrice = getCurrentPrice();
+
+        emit ReservesSynced(usdtReserve, tokenReserve);
+        
+        return newPrice;
+    }
+
+    /**
+     * @notice Withdraw USDT from pool (security measure for temporary contracts)
+     * @dev Can only be called by owner, has reentrancy protection
+     * @param amount Amount of USDT to withdraw
+     * @return newPrice The new price after withdrawal
+     */
+    function withdrawUSDT(
+        uint256 amount
+    ) external onlyOwner nonReentrant returns (uint256 newPrice) {
+        require(amount > 0, "Amount must be > 0");
+        require(amount <= usdtReserve, "Insufficient USDT in pool");
+        
+        uint256 priceBefore = getCurrentPrice();
+
+        // Update reserves
+        usdtReserve -= amount;
+
+        // Send USDT to owner
+        require(
+            usdtToken.transfer(msg.sender, amount),
+            "USDT transfer failed"
+        );
+
+        // Calculate new price
+        newPrice = getCurrentPrice();
+
+        emit ReservesSynced(usdtReserve, tokenReserve);
+        
+        return newPrice;
+    }
+
     // ==================== EMERGENCY FUNCTIONS ====================
     /**
      * @notice Adjust virtual burned tokens (for corrections if needed)
