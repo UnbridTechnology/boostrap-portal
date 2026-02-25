@@ -80,20 +80,18 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
     }
     
     // ==================== PRICE FUNCTIONS (CORREGIDAS) ====================
-    function getCurrentPrice() public view returns (uint256) {
-        uint256 effectiveTokens = getEffectiveTokens();
-        if (effectiveTokens == 0) return 0;
-        
-        // Fórmula corregida para manejar diferentes decimales:
-        // price = (usdtReserve * 10^priceDecimals * precisionMultiplier) / effectiveTokens
-        // Luego dividimos por precisionMultiplier para normalizar
-        
-        uint256 usdtScaled = usdtReserve * (10 ** priceDecimals) * precisionMultiplier;
-        uint256 price = usdtScaled / effectiveTokens;
-        
-        // Normalizar dividiendo por precisionMultiplier
-        return price / precisionMultiplier;
-    }
+function getCurrentPrice() public view returns (uint256) {
+    uint256 effectiveTokens = getEffectiveTokens();
+    if (effectiveTokens == 0) return 0;
+    
+    // Convertir USDT a la misma base decimal que los tokens (18)
+    uint256 usdtInTokenDecimals = usdtReserve * (10 ** (tokenDecimals - usdtDecimals));
+    
+    // Calcular precio: (USDT_en_18decimals * 10^priceDecimals) / tokens_en_18decimals
+    uint256 price = (usdtInTokenDecimals * (10 ** priceDecimals)) / effectiveTokens;
+    
+    return price; // Retorna 3397 para 0.003397 USDT
+}
     
     /**
      * @notice Get price in human readable format (as uint with priceDecimals)
