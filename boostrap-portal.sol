@@ -18,6 +18,7 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
     // ==================== STATE VARIABLES ====================
     IERC20 public immutable usdtToken;
     IERC20 public immutable fierceToken;
+    address public immutable treasuryAddress;
 
     // Pool state
     uint256 public usdtReserve;
@@ -25,7 +26,7 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
     uint256 public virtualBurnedTokens;
 
     // Fee configuration
-    uint256 public swapFeePercent = 300; // 3% default
+    uint256 public swapFeePercent = 100; // 1% default
 
     // ==================== EVENTS ====================
     event PoolInitialized(uint256 usdtAmount, uint256 tokenAmount);
@@ -41,13 +42,16 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
     constructor(
         address _usdtAddress,
         address _fierceTokenAddress,
-        address _initialOwner
+        address _initialOwner,
+        address _treasuryAddress
     ) Ownable(_initialOwner) {
         require(_usdtAddress != address(0), "Invalid USDT address");
         require(_fierceTokenAddress != address(0), "Invalid token address");
+        require(_treasuryAddress != address(0), "Invalid treasury address");
         
         usdtToken = IERC20(_usdtAddress);
         fierceToken = IERC20(_fierceTokenAddress);
+        treasuryAddress = _treasuryAddress;
     }
     
     // ==================== CONFIGURATION FUNCTIONS ====================
@@ -405,7 +409,7 @@ function getCurrentPrice() public view returns (uint256) {
         tokenReserve -= amount;
         
         require(
-            fierceToken.transfer(msg.sender, amount),
+            fierceToken.transfer(treasuryAddress, amount),
             "Token transfer failed"
         );
 
@@ -424,7 +428,7 @@ function getCurrentPrice() public view returns (uint256) {
         usdtReserve -= amount;
         
         require(
-            usdtToken.transfer(msg.sender, amount),
+            usdtToken.transfer(treasuryAddress, amount),
             "USDT transfer failed"
         );
 
