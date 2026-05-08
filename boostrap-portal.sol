@@ -30,6 +30,7 @@ contract BootstrapPortal is Ownable, ReentrancyGuard {
 
     // ==================== EVENTS ====================
     event PoolInitialized(uint256 usdtAmount, uint256 tokenAmount);
+    event LiquidityAdded(address indexed provider, uint256 usdtAmount, uint256 tokenAmount, uint256 newPrice);
     event ServicePurchased(address indexed buyer, address indexed userAddress, uint256 usdtAmount, uint256 burnPercent, uint256 tokensBurnedVirtual, uint256 priceBefore, uint256 priceAfter);
     event TokensBought(address indexed buyer, uint256 usdtAmount, uint256 tokensReceived, uint256 priceBefore, uint256 priceAfter);
     event TokensSold(address indexed seller, uint256 tokenAmount, uint256 usdtReceived, uint256 priceBefore, uint256 priceAfter);
@@ -167,6 +168,35 @@ function getCurrentPrice() public view returns (uint256) {
         virtualBurnedTokens = 0;
         
         emit PoolInitialized(initialUsdt, initialTokens);
+    }
+    
+    // ==================== ADD LIQUIDITY ====================
+    function addLiquidity(
+        uint256 usdtAmount,
+        uint256 tokenAmount
+    ) external onlyOwner nonReentrant returns (uint256 newPrice) {
+        require(usdtReserve > 0 && tokenReserve > 0, "Pool not initialized");
+        require(usdtAmount > 0 && tokenAmount > 0, "Amounts must be > 0");
+
+        // Transfer tokens to the contract
+        require(
+            usdtToken.transferFrom(msg.sender, address(this), usdtAmount),
+            "USDT transfer failed"
+        );
+        require(
+            fierceToken.transferFrom(msg.sender, address(this), tokenAmount),
+            "Token transfer failed"
+        );
+
+        // Update reserves
+        usdtReserve += usdtAmount;
+        tokenReserve += tokenAmount;
+        
+        newPrice = getCurrentPrice();
+        
+        emit LiquidityAdded(msg.sender, usdtAmount, tokenAmount, newPrice);
+        
+        return newPrice;
     }
     
     // ==================== SERVICE PURCHASE ====================
