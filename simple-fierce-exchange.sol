@@ -41,6 +41,14 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
         uint256 priceUsed
     );
     
+    event USDTSwappedForTokens(
+        address indexed user,
+        uint256 usdtAmount,
+        uint256 tokensReceived,
+        uint256 fee,
+        uint256 priceUsed
+    );
+    
     event PriceUpdated(uint256 newPrice, uint256 decimals);
     event FeeUpdated(uint256 newFee);
     event ReservesUpdated(uint256 usdtAmount, uint256 tokenAmount);
@@ -68,15 +76,17 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
     }
     
     // ============================================================
-    //              MAIN FUNCTION (Users)
+    //              MAIN FUNCTIONS (Backend only - onlyOwner)
     // ============================================================
     
     /**
      * @dev Swaps ERC20 tokens for USDT at fixed price
+     * @param seller Address of the user selling tokens (must have approved tokens to this contract)
      * @param tokenAmount Amount of tokens to sell (in 18 decimals)
      */
-    function swapTokensForUSDT(uint256 tokenAmount) external nonReentrant {
+    function swapTokensForUSDT(address seller, uint256 tokenAmount) external onlyOwner nonReentrant {
         require(systemActive, "System is paused");
+        require(seller != address(0), "Invalid seller");
         require(tokenAmount > 0, "Amount must be > 0");
         require(fixedPrice > 0, "Price not set");
         
@@ -92,9 +102,9 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
         // 3. Check USDT reserve
         require(usdtAfterFee <= usdtReserve, "Insufficient USDT in reserve");
         
-        // 4. Transfer tokens from user to contract
+        // 4. Transfer tokens from seller to contract
         require(
-            fierceToken.transferFrom(msg.sender, address(this), tokenAmount),
+            fierceToken.transferFrom(seller, address(this), tokenAmount),
             "Token transfer failed"
         );
         
@@ -110,16 +120,72 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
             );
         }
         
-        // 7. Send USDT to user
+        // 7. Send USDT to seller
         require(
-            usdtToken.transfer(msg.sender, usdtAfterFee),
+            usdtToken.transfer(seller, usdtAfterFee),
             "USDT transfer failed"
         );
         
         emit TokensSwappedForUSDT(
-            msg.sender,
+            seller,
             tokenAmount,
             usdtAfterFee,
+            fee,
+            fixedPrice
+        );
+    }
+    
+    /**
+     * @dev Swaps USDT for ERC20 tokens at fixed price
+     * @param buyer Address of the user buying tokens (must have approved USDT to this contract)
+     * @param usdtAmount Amount of USDT to spend (in 6 decimals)
+     */
+    function swapUSDTForTokens(address buyer, uint256 usdtAmount) external onlyOwner nonReentrant {
+        require(systemActive, "System is paused");
+        require(buyer != address(0), "Invalid buyer");
+        require(usdtAmount > 0, "Amount must be > 0");
+        require(fixedPrice > 0, "Price not set");
+        
+        // 1. Calculate tokens at fixed price
+        // Formula: tokens = (usdtAmount * 10^priceDecimals) / price
+        uint256 tokensAmount = (usdtAmount * (10 ** priceDecimals)) / fixedPrice;
+        require(tokensAmount > 0, "Token amount too small");
+        
+        // 2. Apply swap fee (deducted from tokens received)
+        uint256 fee = (tokensAmount * swapFeePercent) / PERCENT_DECIMALS;
+        uint256 tokensAfterFee = tokensAmount - fee;
+        
+        // 3. Check token reserve
+        require(tokensAfterFee <= tokenReserve, "Insufficient tokens in reserve");
+        
+        // 4. Transfer USDT from buyer to contract
+        require(
+            usdtToken.transferFrom(buyer, address(this), usdtAmount),
+            "USDT transfer failed"
+        );
+        
+        // 5. Update reserves
+        usdtReserve += usdtAmount;
+        tokenReserve -= tokensAfterFee;
+        
+        // 6. Send fee to treasury (in tokens)
+        if (fee > 0) {
+            require(
+                fierceToken.transfer(treasuryAddress, fee),
+                "Fee transfer failed"
+            );
+        }
+        
+        // 7. Send tokens to buyer
+        require(
+            fierceToken.transfer(buyer, tokensAfterFee),
+            "Token transfer failed"
+        );
+        
+        emit USDTSwappedForTokens(
+            buyer,
+            usdtAmount,
+            tokensAfterFee,
             fee,
             fixedPrice
         );
@@ -198,6 +264,19 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
         uint256 usdtBeforeFee = (usdtAmount * PERCENT_DECIMALS) / (PERCENT_DECIMALS - swapFeePercent);
         tokenAmount = (usdtBeforeFee * (10 ** priceDecimals)) / fixedPrice;
         return tokenAmount;
+    }
+    
+    /**
+     * @dev Estimates how many tokens you would receive when spending USDT
+     */
+    function estimateUSDTForTokens(uint256 usdtAmount) external view returns (
+        uint256 tokenAmount,
+        uint256 fee,
+        uint256 tokensAfterFee
+    ) {
+        tokenAmount = (usdtAmount * (10 ** priceDecimals)) / fixedPrice;
+        fee = (tokenAmount * swapFeePercent) / PERCENT_DECIMALS;
+        tokensAfterFee = tokenAmount - fee;
     }
     
     // ============================================================
