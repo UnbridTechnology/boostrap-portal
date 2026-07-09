@@ -8,17 +8,21 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 /**
  * @title SimpleFierceSwap
  * @author Your Platform
- * @notice Simple contract to swap ERC20 ↔ USDT
+ * @notice Simple contract to swap ERC20 ↔ USDT with correct decimal handling
  * 
+ * @dev USDT uses 6 decimals, FIERCE token uses 18 decimals
+ *      All USDT amounts in the contract are stored with 6 decimals
  */
 contract SimpleFierceSwap is Ownable, ReentrancyGuard {
     // ==================== CONSTANTS ====================
     uint256 public constant PERCENT_DECIMALS = 10000; // 10000 = 100%
+    uint256 public constant USDT_DECIMALS = 6;
+    uint256 public constant TOKEN_DECIMALS = 18;
     
     // ==================== CONFIGURATION ====================
     uint256 public priceDecimals = 4; // Price decimals (4 = 0.0000)
-    uint256 public fixedPrice = 35; // 0.0035 USDT (35/10000)
-    uint256 public swapFeePercent = 100; // 1% - Swap fee
+    uint256 public fixedPrice = 35; // Price in 4 decimals (35 = 0.0035)
+    uint256 public swapFeePercent = 250; // 2.5% fee
     
     // ==================== TOKENS ====================
     IERC20 public immutable usdtToken;
@@ -26,8 +30,8 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
     address public immutable treasuryAddress; // Where fees go
     
     // ==================== RESERVES ====================
-    uint256 public usdtReserve; // USDT available to pay
-    uint256 public tokenReserve; // Tokens available (for reference only)
+    uint256 public usdtReserve; // USDT available to pay (in 6 decimals)
+    uint256 public tokenReserve; // Tokens available (in 18 decimals)
     
     // ==================== CONTROLS ====================
     bool public systemActive = true;
@@ -93,26 +97,33 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
         // 1. Calculate USDT at fixed price
         // Formula: USDT = (tokens * price) / 10^priceDecimals
         uint256 usdtAmount = (tokenAmount * fixedPrice) / (10 ** priceDecimals);
-        require(usdtAmount > 0, "USDT amount too small");
         
-        // 2. Apply swap fee
-        uint256 fee = (usdtAmount * swapFeePercent) / PERCENT_DECIMALS;
-        uint256 usdtAfterFee = usdtAmount - fee;
+        // 2. Convert to 6 decimals (USDT standard)
+        // token has 18 decimals, priceDecimals can be variable
+        // Adjustment = 10^(18 - priceDecimals - 6)
+        uint256 adjustment = 10 ** (TOKEN_DECIMALS - priceDecimals - USDT_DECIMALS);
+        uint256 usdtAmount6Decimals = usdtAmount / adjustment;
         
-        // 3. Check USDT reserve
+        require(usdtAmount6Decimals > 0, "USDT amount too small");
+        
+        // 3. Apply swap fee
+        uint256 fee = (usdtAmount6Decimals * swapFeePercent) / PERCENT_DECIMALS;
+        uint256 usdtAfterFee = usdtAmount6Decimals - fee;
+        
+        // 4. Check USDT reserve (both in 6 decimals)
         require(usdtAfterFee <= usdtReserve, "Insufficient USDT in reserve");
         
-        // 4. Transfer tokens from seller to contract
+        // 5. Transfer tokens from seller to contract
         require(
             fierceToken.transferFrom(seller, address(this), tokenAmount),
             "Token transfer failed"
         );
         
-        // 5. Update reserves
+        // 6. Update reserves
         tokenReserve += tokenAmount;
         usdtReserve -= usdtAfterFee;
         
-        // 6. Send fee to treasury
+        // 7. Send fee to treasury (in USDT, 6 decimals)
         if (fee > 0) {
             require(
                 usdtToken.transfer(treasuryAddress, fee),
@@ -120,7 +131,7 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
             );
         }
         
-        // 7. Send USDT to seller
+        // 8. Send USDT to seller (6 decimals)
         require(
             usdtToken.transfer(seller, usdtAfterFee),
             "USDT transfer failed"
@@ -146,19 +157,20 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
         require(usdtAmount > 0, "Amount must be > 0");
         require(fixedPrice > 0, "Price not set");
         
-        // 1. Calculate tokens at fixed price
-        // Formula: tokens = (usdtAmount * 10^priceDecimals) / price
-        uint256 tokensAmount = (usdtAmount * (10 ** priceDecimals)) / fixedPrice;
-        require(tokensAmount > 0, "Token amount too small");
+        // 1. Calculate tokens at fixed price (in 18 decimals)
+        // Formula: tokens = (usdtAmount * 10^priceDecimals * 10^(18-6)) / price
+        // Simplified: tokens = (usdtAmount * 10^(priceDecimals + 12)) / price
+        uint256 tokenAmount = (usdtAmount * (10 ** (priceDecimals + TOKEN_DECIMALS - USDT_DECIMALS))) / fixedPrice;
+        require(tokenAmount > 0, "Token amount too small");
         
         // 2. Apply swap fee (deducted from tokens received)
-        uint256 fee = (tokensAmount * swapFeePercent) / PERCENT_DECIMALS;
-        uint256 tokensAfterFee = tokensAmount - fee;
+        uint256 fee = (tokenAmount * swapFeePercent) / PERCENT_DECIMALS;
+        uint256 tokensAfterFee = tokenAmount - fee;
         
         // 3. Check token reserve
         require(tokensAfterFee <= tokenReserve, "Insufficient tokens in reserve");
         
-        // 4. Transfer USDT from buyer to contract
+        // 4. Transfer USDT from buyer to contract (6 decimals)
         require(
             usdtToken.transferFrom(buyer, address(this), usdtAmount),
             "USDT transfer failed"
@@ -168,7 +180,7 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
         usdtReserve += usdtAmount;
         tokenReserve -= tokensAfterFee;
         
-        // 6. Send fee to treasury (in tokens)
+        // 6. Send fee to treasury (in tokens, 18 decimals)
         if (fee > 0) {
             require(
                 fierceToken.transfer(treasuryAddress, fee),
@@ -176,7 +188,7 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
             );
         }
         
-        // 7. Send tokens to buyer
+        // 7. Send tokens to buyer (18 decimals)
         require(
             fierceToken.transfer(buyer, tokensAfterFee),
             "Token transfer failed"
@@ -245,36 +257,50 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
     
     /**
      * @dev Estimates how much USDT you would receive when selling tokens
+     * @param tokenAmount Amount of tokens to sell (in 18 decimals)
+     * @return usdtAmount Total USDT before fee (in 6 decimals)
+     * @return fee Fee amount (in 6 decimals)
+     * @return usdtAfterFee USDT after fee (in 6 decimals)
      */
     function estimateSwap(uint256 tokenAmount) external view returns (
         uint256 usdtAmount,
         uint256 fee,
         uint256 usdtAfterFee
     ) {
-        usdtAmount = (tokenAmount * fixedPrice) / (10 ** priceDecimals);
+        // Calculate USDT in 18 decimals then convert to 6 decimals
+        uint256 usdtAmount18Dec = (tokenAmount * fixedPrice) / (10 ** priceDecimals);
+        uint256 adjustment = 10 ** (TOKEN_DECIMALS - priceDecimals - USDT_DECIMALS);
+        usdtAmount = usdtAmount18Dec / adjustment;
+        
         fee = (usdtAmount * swapFeePercent) / PERCENT_DECIMALS;
         usdtAfterFee = usdtAmount - fee;
     }
     
     /**
      * @dev Calculates how many tokens you need to get X USDT
+     * @param usdtAmount Amount of USDT desired (in 6 decimals)
+     * @return tokenAmount Tokens needed (in 18 decimals)
      */
     function estimateTokensForUSDT(uint256 usdtAmount) external view returns (uint256 tokenAmount) {
         // Adjust for fee
         uint256 usdtBeforeFee = (usdtAmount * PERCENT_DECIMALS) / (PERCENT_DECIMALS - swapFeePercent);
-        tokenAmount = (usdtBeforeFee * (10 ** priceDecimals)) / fixedPrice;
+        tokenAmount = (usdtBeforeFee * (10 ** (priceDecimals + TOKEN_DECIMALS - USDT_DECIMALS))) / fixedPrice;
         return tokenAmount;
     }
     
     /**
      * @dev Estimates how many tokens you would receive when spending USDT
+     * @param usdtAmount Amount of USDT to spend (in 6 decimals)
+     * @return tokenAmount Total tokens before fee (in 18 decimals)
+     * @return fee Fee amount (in 18 decimals)
+     * @return tokensAfterFee Tokens after fee (in 18 decimals)
      */
     function estimateUSDTForTokens(uint256 usdtAmount) external view returns (
         uint256 tokenAmount,
         uint256 fee,
         uint256 tokensAfterFee
     ) {
-        tokenAmount = (usdtAmount * (10 ** priceDecimals)) / fixedPrice;
+        tokenAmount = (usdtAmount * (10 ** (priceDecimals + TOKEN_DECIMALS - USDT_DECIMALS))) / fixedPrice;
         fee = (tokenAmount * swapFeePercent) / PERCENT_DECIMALS;
         tokensAfterFee = tokenAmount - fee;
     }
@@ -284,7 +310,8 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
     // ============================================================
     
     /**
-     * @dev Deposits USDT to reserve
+     * @dev Deposits USDT to reserve and auto-syncs reserves
+     * @param amount Amount of USDT to deposit (in 6 decimals)
      */
     function depositUSDT(uint256 amount) external onlyOwner nonReentrant {
         require(amount > 0, "Amount must be > 0");
@@ -294,6 +321,7 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
             "USDT transfer failed"
         );
         
+        // Update reserves
         usdtReserve += amount;
         
         emit USDTDeposited(msg.sender, amount);
@@ -301,7 +329,8 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
     }
     
     /**
-     * @dev Deposits tokens to reserve (optional, for reference only)
+     * @dev Deposits tokens to reserve and auto-syncs reserves
+     * @param amount Amount of tokens to deposit (in 18 decimals)
      */
     function depositTokens(uint256 amount) external onlyOwner nonReentrant {
         require(amount > 0, "Amount must be > 0");
@@ -311,6 +340,45 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
             "Token transfer failed"
         );
         
+        // Update reserves
+        tokenReserve += amount;
+        
+        emit TokensDeposited(msg.sender, amount);
+        emit ReservesUpdated(usdtReserve, tokenReserve);
+    }
+    
+    /**
+     * @dev Deposits USDT and auto-syncs reserves in one transaction
+     * @param amount Amount of USDT to deposit (in 6 decimals)
+     */
+    function depositUSDTAndSync(uint256 amount) external onlyOwner nonReentrant {
+        require(amount > 0, "Amount must be > 0");
+        
+        require(
+            usdtToken.transferFrom(msg.sender, address(this), amount),
+            "USDT transfer failed"
+        );
+        
+        // Update reserves
+        usdtReserve += amount;
+        
+        emit USDTDeposited(msg.sender, amount);
+        emit ReservesUpdated(usdtReserve, tokenReserve);
+    }
+    
+    /**
+     * @dev Deposits tokens and auto-syncs reserves in one transaction
+     * @param amount Amount of tokens to deposit (in 18 decimals)
+     */
+    function depositTokensAndSync(uint256 amount) external onlyOwner nonReentrant {
+        require(amount > 0, "Amount must be > 0");
+        
+        require(
+            fierceToken.transferFrom(msg.sender, address(this), amount),
+            "Token transfer failed"
+        );
+        
+        // Update reserves
         tokenReserve += amount;
         
         emit TokensDeposited(msg.sender, amount);
@@ -354,6 +422,7 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
     
     /**
      * @dev Withdraws USDT from reserve (emergency)
+     * @param amount Amount of USDT to withdraw (in 6 decimals)
      */
     function withdrawUSDT(uint256 amount) external onlyOwner nonReentrant {
         require(amount > 0 && amount <= usdtReserve, "Invalid amount");
@@ -371,6 +440,7 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
     
     /**
      * @dev Withdraws tokens from reserve (emergency)
+     * @param amount Amount of tokens to withdraw (in 18 decimals)
      */
     function withdrawTokens(uint256 amount) external onlyOwner nonReentrant {
         require(amount > 0 && amount <= tokenReserve, "Invalid amount");
@@ -387,7 +457,7 @@ contract SimpleFierceSwap is Ownable, ReentrancyGuard {
     }
     
     /**
-     * @dev Syncs reserves with real balances
+     * @dev Syncs reserves with real balances (manual sync)
      */
     function syncReserves() external onlyOwner {
         uint256 realUSDT = usdtToken.balanceOf(address(this));
